@@ -758,7 +758,7 @@ function pageToHashPath(page: Page): string {
   }
 }
 
-const CUSTOMER_VERSION = "1.0.0";
+const CUSTOMER_VERSION = "1.0.1";
 const LICENSE_STORAGE_KEY = "moniezi_license_v1";
 const DEVICE_ID_STORAGE_KEY = "moniezi_device_id_v1";
 const OWNER_LICENSE_KEY = "vgkey";
@@ -776,6 +776,7 @@ type StoredLicense = {
   licenseType?: 'owner' | 'customer';
   deviceId?: string;
   token?: string;
+  serverActivationToken?: string;
 };
 
 function simpleHash(input: string): string {
@@ -791,7 +792,15 @@ function getOrCreateDeviceId(): string {
   try {
     const existing = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
     if (existing) return existing;
-    const created = `mzd_${generateId('dev')}_${Math.random().toString(36).slice(2, 8)}`;
+    const navigatorBits = typeof navigator !== 'undefined'
+      ? [navigator.userAgent, navigator.language, navigator.platform].join('|')
+      : 'server';
+    const screenBits = typeof window !== 'undefined'
+      ? [window.screen?.width || 0, window.screen?.height || 0, window.devicePixelRatio || 1].join('x')
+      : '0x0x1';
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown';
+    const fingerprint = simpleHash(`${navigatorBits}|${screenBits}|${tz}`);
+    const created = `mzd_${fingerprint}_${Math.random().toString(36).slice(2, 8)}`;
     localStorage.setItem(DEVICE_ID_STORAGE_KEY, created);
     return created;
   } catch {
@@ -1502,11 +1511,11 @@ export default function App() {
     checkStoredLicense();
   }, []);
 
-  // License configuration (optional Cloudflare worker later; local validation works now)
-  const LICENSE_API_BASE = (import.meta as any).env?.VITE_LICENSE_API_BASE || "";
+  // License configuration for Cloudflare verification
+  const LICENSE_API_URL = ((import.meta as any).env?.VITE_LICENSE_API_URL || (import.meta as any).env?.VITE_LICENSE_API_BASE || "").replace(/\/$/, "");
   const LICENSE_GRACE_DAYS = 30;
 
-  // Validate license locally now, with optional server validation later
+  // Validate through Cloudflare when configured; owner key always works for private testing
   const validateLicenseWithServer = async (key: string): Promise<boolean> => {
     if (!LICENSING_ENABLED) return true;
 
@@ -1535,6 +1544,7 @@ export default function App() {
           licenseType: 'owner',
           deviceId,
           token: createLicenseToken(normalizedKey, deviceId),
+          serverActivationToken: 'owner-local',
         };
         localStorage.setItem(LICENSE_STORAGE_KEY, JSON.stringify(ownerData));
       }
@@ -1549,30 +1559,18 @@ export default function App() {
       return false;
     }
 
-    if (!LICENSE_API_BASE) {
-      const nowIso = new Date().toISOString();
-      const customerData: StoredLicense = {
-        key: normalizedKey,
-        email: stored?.email || '',
-        purchaseDate: stored?.purchaseDate || nowIso,
-        validated: true,
-        activatedAt: stored?.activatedAt || nowIso,
-        lastValidatedAt: nowIso,
-        validUntil: new Date(Date.now() + LICENSE_GRACE_DAYS * 24 * 60 * 60 * 1000).toISOString(),
-        licenseType: 'customer',
-        deviceId,
-        token: createLicenseToken(normalizedKey, deviceId),
-      };
-      localStorage.setItem(LICENSE_STORAGE_KEY, JSON.stringify(customerData));
-      return true;
+    if (!LICENSE_API_URL) {
+      return hasValidStoredBinding(stored);
     }
 
     try {
-      const url = LICENSE_API_BASE.replace(/\/$/, "") + "/validate";
+      const url = LICENSE_API_URL.includes('/validate') || LICENSE_API_URL.includes('/verify-license')
+        ? LICENSE_API_URL
+        : `${LICENSE_API_URL}/validate`;
       const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ license_key: normalizedKey, device_id: deviceId }),
+        body: JSON.stringify({ license_key: normalizedKey, device_id: deviceId, app: 'MONIEZI' }),
       });
 
       if (!response.ok) {
@@ -1594,6 +1592,7 @@ export default function App() {
           licenseType: 'customer',
           deviceId,
           token: createLicenseToken(normalizedKey, deviceId),
+          serverActivationToken: data.activation_token || data.token || '',
         };
         localStorage.setItem(LICENSE_STORAGE_KEY, JSON.stringify(updated));
       }
@@ -1631,10 +1630,10 @@ export default function App() {
         setShowLicenseModal(false);
         showToast(licenseKey.trim() === OWNER_LICENSE_KEY ? 'Owner license activated' : 'License activated', 'success');
       } else {
-        setLicenseError('Invalid license key. Please check and try again.');
+        setLicenseError(LICENSE_API_URL ? 'Invalid license key. Please check and try again.' : 'License verification is not configured yet. Your owner key will still work for testing.');
       }
     } catch (error) {
-      setLicenseError('Unable to validate license. Please check your internet connection and try again.');
+      setLicenseError('Unable to reach the license verifier. Please check your internet connection and Cloudflare setup, then try again.');
     } finally {
       setIsValidatingLicense(false);
     }
@@ -5207,22 +5206,9 @@ const demoMileageTrips: MileageTrip[] = [
               </button>
             </div>
 
-            {/* Divider */}
-            <div className="flex items-center gap-4 my-6">
-              <div className="flex-1 h-px bg-slate-800" />
-              <span className="text-xs text-slate-600 uppercase tracking-wider">Need a license?</span>
-              <div className="flex-1 h-px bg-slate-800" />
+            <div className="mt-6 rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-center text-sm text-slate-300">
+              Enter your purchase license key to unlock MONIEZI on this device.
             </div>
-
-            {/* Purchase Link */}
-            <a
-              href="https://yourusername.gumroad.com/l/moniezi"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="block w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white font-semibold rounded-xl text-center transition-all"
-            >
-              Buy on Gumroad →
-            </a>
           </div>
 
           {/* Features Preview */}
@@ -8780,7 +8766,6 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
 
               {/* License Tab */}
               {LICENSING_ENABLED && settingsTab === 'license' && (
-
                 <div className="bg-white dark:bg-slate-900 p-8 rounded-xl border border-slate-200 dark:border-slate-800 shadow-lg animate-in fade-in slide-in-from-bottom-4">
                   <div className="flex items-center gap-3 mb-6">
                     <div className="w-10 h-10 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 flex items-center justify-center">
@@ -8788,9 +8773,8 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
                     </div>
                     <h3 className="text-xl font-bold text-slate-900 dark:text-white">License</h3>
                   </div>
-                  
-                  {/* License Status Card */}
-                  <div className={`p-6 rounded-xl border-2 mb-6 ${
+
+                  <div className={`p-6 rounded-xl border-2 ${
                     isLicenseValid 
                       ? 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800' 
                       : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'
@@ -8809,62 +8793,17 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
                             ? 'text-emerald-900 dark:text-emerald-100'
                             : 'text-red-900 dark:text-red-100'
                         }`}>
-                          {isLicenseValid ? 'License Active' : 'No License'}
+                          {isLicenseValid ? 'License Active' : 'License Required'}
                         </h4>
                         <p className={`text-sm ${
                           isLicenseValid
                             ? 'text-emerald-700 dark:text-emerald-300'
                             : 'text-red-700 dark:text-red-300'
                         }`}>
-                          {isLicenseValid 
-                            ? 'Your Moniezi license is valid and active'
-                            : 'Please activate your license to use Moniezi'
-                          }
+                          {isLicenseValid
+                            ? 'This device is activated and ready to use MONIEZI.'
+                            : 'Enter a valid license key on startup to unlock MONIEZI.'}
                         </p>
-                      </div>
-                    </div>
-
-                    {/* License Details */}
-                    {isLicenseValid && licenseInfo && (
-                      <div className="mt-4 pt-4 border-t border-emerald-200 dark:border-emerald-800 space-y-3">
-                        {licenseInfo.email && (
-                          <div>
-                            <label className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider">Email</label>
-                            <p className="text-sm text-emerald-900 dark:text-emerald-100 font-medium break-all">{licenseInfo.email}</p>
-                          </div>
-                        
-              )}
-                        {licenseInfo.purchaseDate && (
-                          <div>
-                            <label className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider">Purchased</label>
-                            <p className="text-sm text-emerald-900 dark:text-emerald-100 font-medium">
-                              {new Date(licenseInfo.purchaseDate).toLocaleDateString()}
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Deactivate License Button */}
-                  {isLicenseValid && (
-                    <button
-                      onClick={handleDeactivateLicense}
-                      className="w-full py-4 bg-slate-100 dark:bg-slate-800 hover:bg-red-100 dark:hover:bg-red-900/30 text-slate-600 dark:text-slate-300 hover:text-red-600 dark:hover:text-red-400 font-bold rounded-xl transition-all flex items-center justify-center gap-2"
-                    >
-                      <Ban size={18} />
-                      Deactivate License
-                    </button>
-                  )}
-
-                  {/* Info Box */}
-                  <div className="mt-6 bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
-                    <div className="flex items-start gap-3">
-                      <Info className="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5" />
-                      <div className="text-sm text-blue-900 dark:text-blue-100">
-                        <p className="font-semibold mb-1">License Information</p>
-                        <p className="mb-2">Your Moniezi license is tied to your Gumroad purchase. If you need to transfer your license to another device, deactivate it here first, then reactivate on your new device.</p>
-                        <p>Need help? Contact support at <a href="mailto:support@moniezi.app" className="underline">support@moniezi.app</a></p>
                       </div>
                     </div>
                   </div>
@@ -8873,71 +8812,8 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
             </div>
           </div>
         )}
-        {/* Safety net: never allow navigation to render a blank screen */}
-        {!([
-          Page.Dashboard,
-          Page.Invoices,
-          Page.Invoice,
-          Page.AllTransactions,
-          Page.Ledger,
-          Page.Income,
-          Page.Expenses,
-          Page.Clients,
-          Page.Mileage,
-          Page.Reports,
-          Page.Settings,
-          Page.InvoiceDoc,
-        ] as const).includes(currentPage) && (
-          <div className="px-4 sm:px-6 pt-6">
-            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-              <div className="text-sm font-semibold text-slate-900">Navigation error</div>
-              <div className="mt-1 text-sm text-slate-600">
-                We couldn&apos;t load this screen. Tap a tab below to continue.
-              </div>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button
-                  onClick={() => setCurrentPage(Page.Dashboard)}
-                  className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
-                >
-                  Home
-                </button>
-                <button
-                  onClick={() => setCurrentPage(Page.Invoices)}
-                  className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-900"
-                >
-                  Invoices
-                </button>
-                <button
-                  onClick={() => setCurrentPage(Page.AllTransactions)}
-                  className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-900"
-                >
-                  Ledger
-                </button>
-                <button
-                  onClick={() => setCurrentPage(Page.Clients)}
-                  className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-900"
-                >
-                  Clients
-                </button>
-                <button
-                  onClick={() => setCurrentPage(Page.Mileage)}
-                  className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-900"
-                >
-                  Mileage
-                </button>
-                <button
-                  onClick={() => setCurrentPage(Page.Reports)}
-                  className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-900"
-                >
-                  Reports
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
 
       </PageErrorBoundary>
-
       </div>
 
       {/* Scroll to Top Button - rendered via Portal to escape overflow-hidden container */}
@@ -8963,9 +8839,9 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
       {/* Help Modal */}
       {showHelpModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-stretch justify-stretch p-0 modal-overlay">
-          <div className="bg-white dark:bg-slate-900 rounded-none w-full h-full overflow-hidden flex flex-col">
+          <div className="bg-white dark:bg-slate-900 rounded-none w-full h-full overflow-hidden flex flex-col" style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 12px)' }}>
             {/* Header */}
-            <div className="flex items-center justify-between p-6 border-b border-slate-200 dark:border-slate-800">
+            <div className="flex items-center justify-between px-6 pb-4 border-b border-slate-200 dark:border-slate-800">
               <div className="flex items-center gap-2">
                 <HelpCircle className="text-blue-600" size={18} />
                 <span className="font-bold text-sm uppercase tracking-wider text-slate-700 dark:text-slate-200">
@@ -8975,7 +8851,7 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
               </div>
               <button
                 onClick={closeHelp}
-                className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
+                className="w-11 h-11 flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors"
                 aria-label="Close help"
               >
                 <X className="w-5 h-5" />
