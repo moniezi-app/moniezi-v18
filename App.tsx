@@ -931,6 +931,39 @@ export default function App() {
   // bottom nav keeps the previous scroll position.
   const mainScrollRef = useRef<HTMLDivElement>(null);
   const [showScrollToTop, setShowScrollToTop] = useState(false);
+  const licenseInputRef = useRef<HTMLInputElement>(null);
+
+  const resetViewportAfterLicenseUnlock = useCallback(() => {
+    try {
+      licenseInputRef.current?.blur();
+      const active = document.activeElement as HTMLElement | null;
+      active?.blur?.();
+    } catch {}
+
+    const toTop = () => {
+      try {
+        window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      } catch {}
+      try {
+        document.documentElement.scrollTop = 0;
+        document.body.scrollTop = 0;
+      } catch {}
+      try {
+        if (mainScrollRef.current) {
+          mainScrollRef.current.scrollTop = 0;
+          if (typeof (mainScrollRef.current as any).scrollTo === 'function') {
+            (mainScrollRef.current as any).scrollTo({ top: 0, left: 0, behavior: 'auto' });
+          }
+        }
+      } catch {}
+    };
+
+    toTop();
+    requestAnimationFrame(toTop);
+    setTimeout(toTop, 60);
+    setTimeout(toTop, 180);
+    setTimeout(toTop, 320);
+  }, []);
 
   // Always reset scroll position when switching bottom tabs.
   // Some mobile browsers "remember" the scrollTop of the same scrolling container.
@@ -1626,8 +1659,12 @@ export default function App() {
       if (ok) {
         const stored = parseStoredLicense(localStorage.getItem(LICENSE_STORAGE_KEY));
         setLicenseInfo({ email: stored?.email, purchaseDate: stored?.purchaseDate });
+        setCurrentPage(Page.Home);
+        resetViewportAfterLicenseUnlock();
         setIsLicenseValid(true);
         setShowLicenseModal(false);
+        setTimeout(resetViewportAfterLicenseUnlock, 80);
+        setTimeout(resetViewportAfterLicenseUnlock, 220);
         showToast(licenseKey.trim() === OWNER_LICENSE_KEY ? 'Owner license activated' : 'License activated', 'success');
       } else {
         setLicenseError(LICENSE_API_URL ? 'Invalid license key. Please check and try again.' : 'License verification is not configured yet. Your owner key will still work for testing.');
@@ -5167,13 +5204,17 @@ const demoMileageTrips: MileageTrip[] = [
                   License Key
                 </label>
                 <input
+                  ref={licenseInputRef}
                   type="text"
                   value={licenseKey}
                   onChange={(e) => { setLicenseKey(e.target.value); setLicenseError(''); }}
                   onKeyDown={(e) => e.key === 'Enter' && handleActivateLicense()}
                   placeholder="Enter your license key"
-                  className="w-full px-4 py-4 bg-slate-950 border border-slate-700 rounded-xl text-white font-mono text-sm placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all"
+                  className="w-full px-4 py-4 bg-slate-950 border border-slate-700 rounded-xl text-white font-mono text-base md:text-sm placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all"
                   disabled={isValidatingLicense}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   autoFocus
                 />
               </div>
