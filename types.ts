@@ -11,6 +11,7 @@ export interface Transaction {
   type: TransactionType;
   notes?: string;
   receiptId?: string; // linked receipt id (IndexedDB)
+  reviewedAt?: string;
 }
 
 
@@ -163,9 +164,10 @@ export interface UserSettings {
   currencySymbol: string;
 
 
-  // --- Tax Prep / Audit Readiness ---
+  // --- Tax Prep / Record Organization ---
   requireReceiptOverThreshold?: boolean;
-  receiptThreshold?: number; // dollars
+  receiptThreshold?: number; // legacy setting kept for backward compatibility
+  receiptReminderEnabled?: boolean;
   mileageRateCents?: number; // cents per mile (can be decimal, e.g. 72.5)
 
   // Invoice Defaults

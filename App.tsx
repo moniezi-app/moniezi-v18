@@ -758,7 +758,7 @@ function pageToHashPath(page: Page): string {
   }
 }
 
-const CUSTOMER_VERSION = "1.0.1";
+const CUSTOMER_VERSION = "1.0.0";
 const LICENSE_STORAGE_KEY = "moniezi_license_v1";
 const DEVICE_ID_STORAGE_KEY = "moniezi_device_id_v1";
 const OWNER_LICENSE_KEY = "vgkey";
@@ -776,7 +776,6 @@ type StoredLicense = {
   licenseType?: 'owner' | 'customer';
   deviceId?: string;
   token?: string;
-  serverActivationToken?: string;
 };
 
 function simpleHash(input: string): string {
@@ -792,15 +791,7 @@ function getOrCreateDeviceId(): string {
   try {
     const existing = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
     if (existing) return existing;
-    const navigatorBits = typeof navigator !== 'undefined'
-      ? [navigator.userAgent, navigator.language, navigator.platform].join('|')
-      : 'server';
-    const screenBits = typeof window !== 'undefined'
-      ? [window.screen?.width || 0, window.screen?.height || 0, window.devicePixelRatio || 1].join('x')
-      : '0x0x1';
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown';
-    const fingerprint = simpleHash(`${navigatorBits}|${screenBits}|${tz}`);
-    const created = `mzd_${fingerprint}_${Math.random().toString(36).slice(2, 8)}`;
+    const created = `mzd_${generateId('dev')}_${Math.random().toString(36).slice(2, 8)}`;
     localStorage.setItem(DEVICE_ID_STORAGE_KEY, created);
     return created;
   } catch {
@@ -931,39 +922,6 @@ export default function App() {
   // bottom nav keeps the previous scroll position.
   const mainScrollRef = useRef<HTMLDivElement>(null);
   const [showScrollToTop, setShowScrollToTop] = useState(false);
-  const licenseInputRef = useRef<HTMLInputElement>(null);
-
-  const resetViewportAfterLicenseUnlock = useCallback(() => {
-    try {
-      licenseInputRef.current?.blur();
-      const active = document.activeElement as HTMLElement | null;
-      active?.blur?.();
-    } catch {}
-
-    const toTop = () => {
-      try {
-        window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
-      } catch {}
-      try {
-        document.documentElement.scrollTop = 0;
-        document.body.scrollTop = 0;
-      } catch {}
-      try {
-        if (mainScrollRef.current) {
-          mainScrollRef.current.scrollTop = 0;
-          if (typeof (mainScrollRef.current as any).scrollTo === 'function') {
-            (mainScrollRef.current as any).scrollTo({ top: 0, left: 0, behavior: 'auto' });
-          }
-        }
-      } catch {}
-    };
-
-    toTop();
-    requestAnimationFrame(toTop);
-    setTimeout(toTop, 60);
-    setTimeout(toTop, 180);
-    setTimeout(toTop, 320);
-  }, []);
 
   // Always reset scroll position when switching bottom tabs.
   // Some mobile browsers "remember" the scrollTop of the same scrolling container.
@@ -1186,6 +1144,8 @@ export default function App() {
   
   // Settings Tab State
   const [settingsTab, setSettingsTab] = useState<'backup' | 'branding' | 'tax' | 'data' | 'license'>('backup');
+  const [expenseReceiptFilter, setExpenseReceiptFilter] = useState<'all' | 'with_receipts' | 'without_receipts'>('all');
+  const [expenseReviewFilter, setExpenseReviewFilter] = useState<'all' | 'new' | 'reviewed'>('all');
 
   const insightsBadgeCount = useMemo(() => {
     return getInsightCount({ transactions, invoices, taxPayments, settings });
@@ -1211,20 +1171,12 @@ export default function App() {
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
-  // Keep Tax Prep audit counters reactive (so demo shows a visible before/after change)
+  // Keep Tax Prep record counters reactive
   useEffect(() => {
     if (!dataLoaded) return;
     const year = taxPrepYear;
-    const requireRcpt = settings.requireReceiptOverThreshold ?? true;
-    const threshold = Number(settings.receiptThreshold ?? 0);
-    if (!requireRcpt) {
-      setAuditMissingReceipts(0);
-      setAuditMissingDelta(0);
-      setAuditMissingPulse(false);
-      return;
-    }
-    const txForYear = transactions.filter(t => new Date(t.date).getFullYear() === year);
-    const missing = txForYear.filter(t => t.type === 'expense' && Number((t as any).amount || 0) >= threshold && !(t as any).receiptId).length;
+    const txForYear = transactions.filter(t => new Date(t.date).getFullYear() === year && t.type === 'expense');
+    const missing = txForYear.filter(t => !(t as any).receiptId).length;
     setAuditMissingReceipts(prev => {
       if (prev === null) return missing;
       if (prev !== missing) {
@@ -1235,7 +1187,7 @@ export default function App() {
       }
       return missing;
     });
-  }, [transactions, settings.requireReceiptOverThreshold, settings.receiptThreshold, taxPrepYear, dataLoaded]);
+  }, [transactions, taxPrepYear, dataLoaded]);
 
   // Backup & Restore State
   const [showRestoreModal, setShowRestoreModal] = useState(false);
@@ -1544,11 +1496,11 @@ export default function App() {
     checkStoredLicense();
   }, []);
 
-  // License configuration for Cloudflare verification
-  const LICENSE_API_URL = ((import.meta as any).env?.VITE_LICENSE_API_URL || (import.meta as any).env?.VITE_LICENSE_API_BASE || "").replace(/\/$/, "");
+  // License configuration (optional Cloudflare worker later; local validation works now)
+  const LICENSE_API_BASE = (import.meta as any).env?.VITE_LICENSE_API_BASE || "";
   const LICENSE_GRACE_DAYS = 30;
 
-  // Validate through Cloudflare when configured; owner key always works for private testing
+  // Validate license locally now, with optional server validation later
   const validateLicenseWithServer = async (key: string): Promise<boolean> => {
     if (!LICENSING_ENABLED) return true;
 
@@ -1577,7 +1529,6 @@ export default function App() {
           licenseType: 'owner',
           deviceId,
           token: createLicenseToken(normalizedKey, deviceId),
-          serverActivationToken: 'owner-local',
         };
         localStorage.setItem(LICENSE_STORAGE_KEY, JSON.stringify(ownerData));
       }
@@ -1592,18 +1543,30 @@ export default function App() {
       return false;
     }
 
-    if (!LICENSE_API_URL) {
-      return hasValidStoredBinding(stored);
+    if (!LICENSE_API_BASE) {
+      const nowIso = new Date().toISOString();
+      const customerData: StoredLicense = {
+        key: normalizedKey,
+        email: stored?.email || '',
+        purchaseDate: stored?.purchaseDate || nowIso,
+        validated: true,
+        activatedAt: stored?.activatedAt || nowIso,
+        lastValidatedAt: nowIso,
+        validUntil: new Date(Date.now() + LICENSE_GRACE_DAYS * 24 * 60 * 60 * 1000).toISOString(),
+        licenseType: 'customer',
+        deviceId,
+        token: createLicenseToken(normalizedKey, deviceId),
+      };
+      localStorage.setItem(LICENSE_STORAGE_KEY, JSON.stringify(customerData));
+      return true;
     }
 
     try {
-      const url = LICENSE_API_URL.includes('/validate') || LICENSE_API_URL.includes('/verify-license')
-        ? LICENSE_API_URL
-        : `${LICENSE_API_URL}/validate`;
+      const url = LICENSE_API_BASE.replace(/\/$/, "") + "/validate";
       const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ license_key: normalizedKey, device_id: deviceId, app: 'MONIEZI' }),
+        body: JSON.stringify({ license_key: normalizedKey, device_id: deviceId }),
       });
 
       if (!response.ok) {
@@ -1625,7 +1588,6 @@ export default function App() {
           licenseType: 'customer',
           deviceId,
           token: createLicenseToken(normalizedKey, deviceId),
-          serverActivationToken: data.activation_token || data.token || '',
         };
         localStorage.setItem(LICENSE_STORAGE_KEY, JSON.stringify(updated));
       }
@@ -1659,18 +1621,20 @@ export default function App() {
       if (ok) {
         const stored = parseStoredLicense(localStorage.getItem(LICENSE_STORAGE_KEY));
         setLicenseInfo({ email: stored?.email, purchaseDate: stored?.purchaseDate });
-        setCurrentPage(Page.Home);
-        resetViewportAfterLicenseUnlock();
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        window.scrollTo({ top: 0, left: 0 });
+        document.documentElement.scrollTop = 0;
+        document.body.scrollTop = 0;
+        setCurrentPage(Page.Dashboard);
         setIsLicenseValid(true);
         setShowLicenseModal(false);
-        setTimeout(resetViewportAfterLicenseUnlock, 80);
-        setTimeout(resetViewportAfterLicenseUnlock, 220);
+        setTimeout(() => window.scrollTo({ top: 0, left: 0 }), 60);
         showToast(licenseKey.trim() === OWNER_LICENSE_KEY ? 'Owner license activated' : 'License activated', 'success');
       } else {
-        setLicenseError(LICENSE_API_URL ? 'Invalid license key. Please check and try again.' : 'License verification is not configured yet. Your owner key will still work for testing.');
+        setLicenseError('Invalid license key. Please check and try again.');
       }
     } catch (error) {
-      setLicenseError('Unable to reach the license verifier. Please check your internet connection and Cloudflare setup, then try again.');
+      setLicenseError('Unable to validate license. Please check your internet connection and try again.');
     } finally {
       setIsValidatingLicense(false);
     }
@@ -1862,8 +1826,9 @@ export default function App() {
           showLogoOnInvoice: true,
           logoAlignment: 'left',
           brandColor: '#2563eb',
-          requireReceiptOverThreshold: true,
+          requireReceiptOverThreshold: false,
           receiptThreshold: 0,
+          receiptReminderEnabled: true,
           mileageRateCents: 72.5,
           ...parsedSettings,
         });
@@ -2713,6 +2678,23 @@ export default function App() {
   }, [transactions, filterPeriod, referenceDate]);
 
   const filteredTransactions = useMemo(() => getFilteredTransactions(), [getFilteredTransactions]);
+
+  const applyExpenseMetaFilters = useCallback((items: any[]) => {
+    return items.filter((item: any) => {
+      if (item?.dataType === 'invoice' || item?.type !== 'expense') return true;
+      const hasReceipt = Boolean(item.receiptId);
+      const reviewed = Boolean(item.reviewedAt);
+      if (expenseReceiptFilter === 'with_receipts' && !hasReceipt) return false;
+      if (expenseReceiptFilter === 'without_receipts' && hasReceipt) return false;
+      if (expenseReviewFilter === 'reviewed' && !reviewed) return false;
+      if (expenseReviewFilter === 'new' && reviewed) return false;
+      return true;
+    });
+  }, [expenseReceiptFilter, expenseReviewFilter]);
+
+  const filteredExpenseItems = useMemo(() => applyExpenseMetaFilters(
+    filteredTransactions.filter(t => t.type === 'expense').sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()) as any
+  ), [filteredTransactions, applyExpenseMetaFilters]);
   
   const ledgerItems = useMemo(() => {
     const txItems = transactions.map(t => ({ ...t, dataType: 'transaction', listId: t.id, original: t, sortDate: new Date(t.date).getTime() }));
@@ -2732,6 +2714,8 @@ export default function App() {
     }
     return merged.sort((a, b) => b.sortDate - a.sortDate);
   }, [transactions, invoices, filterPeriod, referenceDate, ledgerFilter]);
+
+  const filteredLedgerItems = useMemo(() => applyExpenseMetaFilters(ledgerItems as any), [ledgerItems, applyExpenseMetaFilters]);
 
   const periodTotals = useMemo(() => {
     const inc = filteredTransactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
@@ -3442,7 +3426,7 @@ const demoMileageTrips: MileageTrip[] = [
       const t = calcDocTotals(e.items as any, e.discount || 0, e.taxRate || 0, e.shipping || 0);
       return { ...e, subtotal: t.subtotal, amount: t.total } as Estimate;
     }));
-    setSettings({ ...demo.settings, requireReceiptOverThreshold: true, receiptThreshold: 100, mileageRateCents: 72.5 });
+    setSettings({ ...demo.settings, requireReceiptOverThreshold: false, receiptThreshold: 0, receiptReminderEnabled: true, mileageRateCents: 72.5 });
     setTaxPayments([...(demo.taxPayments || [])] as TaxPayment[]);
     setSeedSuccess(true); showToast("Demo data loaded successfully!", "success"); setCurrentPage(Page.Dashboard); setTimeout(() => setSeedSuccess(false), 2000);
   };
@@ -3483,8 +3467,9 @@ const demoMileageTrips: MileageTrip[] = [
       showLogoOnInvoice: true,
       logoAlignment: 'left',
       brandColor: '#2563eb',
-      requireReceiptOverThreshold: true,
+      requireReceiptOverThreshold: false,
       receiptThreshold: 0,
+      receiptReminderEnabled: true,
       mileageRateCents: 72.5,
     });
 
@@ -3509,17 +3494,17 @@ const demoMileageTrips: MileageTrip[] = [
     if (!data.name?.trim()) return showToast("Please enter a description", "error");
     if (!data.amount || Number(data.amount) <= 0) return showToast("Please enter a valid amount", "error");
     const isExpense = ((data.type as any) || activeTab) === 'expense';
-    const requireReceipt = settings.requireReceiptOverThreshold ?? true;
-    const threshold = Number(settings.receiptThreshold ?? 0);
-    const amt = Number(data.amount);
-    if (isExpense && requireReceipt && amt >= threshold && !data.receiptId) {
-      return showToast("Receipt is required for this expense. Link or scan a receipt.", "error");
-    }
-    const newTx: Transaction = { id: generateId('tx'), name: data.name, amount: Number(data.amount), category: data.category || "General", date: data.date || new Date().toISOString().split('T')[0], type: (data.type as any) || 'income', notes: data.notes, receiptId: data.receiptId };
+    const shouldRemindReceipt = settings.receiptReminderEnabled ?? true;
+    const newTx: Transaction = { id: generateId('tx'), name: data.name, amount: Number(data.amount), category: data.category || "General", date: data.date || new Date().toISOString().split('T')[0], type: (data.type as any) || 'income', notes: data.notes, receiptId: data.receiptId, reviewedAt: (data as any).reviewedAt };
     if (drawerMode === 'edit_tx' && activeItem.id) {
-      setTransactions(prev => prev.map(t => t.id === activeItem.id ? { ...t, ...newTx, id: t.id } as Transaction : t)); showToast("Transaction updated", "success");
+      setTransactions(prev => prev.map(t => t.id === activeItem.id ? { ...t, ...newTx, id: t.id } as Transaction : t));
+      showToast("Transaction updated", "success");
     } else {
-      setTransactions(prev => [newTx, ...prev]); showToast("Transaction saved", "success");
+      setTransactions(prev => [newTx, ...prev]);
+      showToast("Transaction saved", "success");
+    }
+    if (isExpense && shouldRemindReceipt && !data.receiptId) {
+      showToast('Tip: attach a receipt if you have one. You can add it later.', 'info');
     }
     setIsDrawerOpen(false);
   };
@@ -3542,6 +3527,16 @@ const demoMileageTrips: MileageTrip[] = [
     if (!confirm('Delete this mileage trip?')) return;
     setMileageTrips(prev => prev.filter(t => t.id !== id));
     showToast('Mileage trip deleted', 'info');
+  };
+
+  const toggleTransactionReviewed = (id: string) => {
+    let becameReviewed = false;
+    setTransactions(prev => prev.map(t => {
+      if (t.id !== id) return t;
+      becameReviewed = !(t as any).reviewedAt;
+      return { ...t, reviewedAt: (t as any).reviewedAt ? undefined : new Date().toISOString() } as Transaction;
+    }));
+    showToast(becameReviewed ? 'Marked as reviewed' : 'Marked as new', 'success');
   };
 
   const duplicateTransaction = (original: Transaction) => {
@@ -5204,13 +5199,12 @@ const demoMileageTrips: MileageTrip[] = [
                   License Key
                 </label>
                 <input
-                  ref={licenseInputRef}
                   type="text"
                   value={licenseKey}
                   onChange={(e) => { setLicenseKey(e.target.value); setLicenseError(''); }}
                   onKeyDown={(e) => e.key === 'Enter' && handleActivateLicense()}
                   placeholder="Enter your license key"
-                  className="w-full px-4 py-4 bg-slate-950 border border-slate-700 rounded-xl text-white font-mono text-base md:text-sm placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all"
+                  className="w-full px-4 py-4 bg-slate-950 border border-slate-700 rounded-xl text-white font-mono text-base placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all"
                   disabled={isValidatingLicense}
                   autoCapitalize="none"
                   autoCorrect="off"
@@ -5247,8 +5241,16 @@ const demoMileageTrips: MileageTrip[] = [
               </button>
             </div>
 
-            <div className="mt-6 rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-center text-sm text-slate-300">
-              Enter your purchase license key to unlock MONIEZI on this device.
+            {/* Divider */}
+            <div className="flex items-center gap-4 my-6">
+              <div className="flex-1 h-px bg-slate-800" />
+              <span className="text-xs text-slate-600 uppercase tracking-wider">Need a license?</span>
+              <div className="flex-1 h-px bg-slate-800" />
+            </div>
+
+            {/* Purchase Hint */}
+            <div className="block w-full py-3 bg-slate-800 text-slate-300 font-semibold rounded-xl text-center">
+              Use the license key from your purchase confirmation
             </div>
           </div>
 
@@ -6174,6 +6176,23 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
 
              <PeriodSelector period={filterPeriod} setPeriod={setFilterPeriod} refDate={referenceDate} setRefDate={setReferenceDate} />
 
+             {(currentPage === Page.Expenses || currentPage === Page.AllTransactions || currentPage === Page.Ledger) && (
+               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                 <div className="flex flex-wrap gap-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-3">
+                   <div className="w-full text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Receipts</div>
+                   <button onClick={() => setExpenseReceiptFilter('all')} className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider ${expenseReceiptFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'}`}>All</button>
+                   <button onClick={() => setExpenseReceiptFilter('with_receipts')} className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider ${expenseReceiptFilter === 'with_receipts' ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'}`}>With receipts</button>
+                   <button onClick={() => setExpenseReceiptFilter('without_receipts')} className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider ${expenseReceiptFilter === 'without_receipts' ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'}`}>Without receipts</button>
+                 </div>
+                 <div className="flex flex-wrap gap-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-3">
+                   <div className="w-full text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Review status</div>
+                   <button onClick={() => setExpenseReviewFilter('all')} className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider ${expenseReviewFilter === 'all' ? 'bg-emerald-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'}`}>All</button>
+                   <button onClick={() => setExpenseReviewFilter('new')} className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider ${expenseReviewFilter === 'new' ? 'bg-emerald-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'}`}>New</button>
+                   <button onClick={() => setExpenseReviewFilter('reviewed')} className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider ${expenseReviewFilter === 'reviewed' ? 'bg-emerald-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'}`}>Reviewed</button>
+                 </div>
+               </div>
+             )}
+
         {(currentPage === Page.AllTransactions || currentPage === Page.Ledger) && (
                <div className="flex bg-slate-200 dark:bg-slate-900 p-1 rounded-lg mb-4">
                   {(['all', 'income', 'expense', 'invoice'] as const).map(f => (
@@ -6190,10 +6209,10 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
              )}
 
              <div className="space-y-4">
-               {((currentPage === Page.AllTransactions || currentPage === Page.Ledger) ? ledgerItems : filteredTransactions.filter(t => currentPage === Page.Income ? t.type === 'income' : t.type === 'expense')).length === 0 ? (
+               {((currentPage === Page.AllTransactions || currentPage === Page.Ledger) ? filteredLedgerItems : currentPage === Page.Income ? filteredTransactions.filter(t => t.type === 'income') : filteredExpenseItems).length === 0 ? (
                   <EmptyState icon={currentPage === Page.Income ? <Wallet size={32} /> : currentPage === Page.Expenses ? <Receipt size={32} /> : <History size={32} />} title="No Items Found" subtitle="No activity found for the selected period." action={() => handleOpenFAB('income')} actionLabel="Add Transaction" />
                ) : (
-                ((currentPage === Page.AllTransactions || currentPage === Page.Ledger) ? ledgerItems : filteredTransactions.filter(t => currentPage === Page.Income ? t.type === 'income' : t.type === 'expense').sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime())).map((item: any) => {
+                ((currentPage === Page.AllTransactions || currentPage === Page.Ledger) ? filteredLedgerItems : currentPage === Page.Income ? filteredTransactions.filter(t => t.type === 'income') : filteredExpenseItems).map((item: any) => {
                   const isInvoice = item.dataType === 'invoice';
                   const isIncome = item.type === 'income';
                   const amountColor = isInvoice ? 'text-blue-600 dark:text-blue-400' : isIncome ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400';
@@ -6294,6 +6313,12 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
                                       {invoiceStatusBadge}
                                   </div>
                                   <div className="text-xs font-medium text-slate-600 dark:text-slate-300">{item.date} · {item.category}</div>
+                                  {!isIncome && !isInvoice && (
+                                    <div className="mt-2 flex flex-wrap gap-2">
+                                      <span className={`text-[10px] font-extrabold uppercase tracking-widest px-2 py-1 rounded-full ${item.receiptId ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300' : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'}`}>{item.receiptId ? 'Receipt attached' : 'No receipt'}</span>
+                                      <span className={`text-[10px] font-extrabold uppercase tracking-widest px-2 py-1 rounded-full ${(item as any).reviewedAt ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300' : 'bg-amber-100 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300'}`}>{(item as any).reviewedAt ? 'Reviewed' : 'New'}</span>
+                                    </div>
+                                  )}
                               </div>
                           </div>
                           <div className={`text-xl font-bold whitespace-nowrap flex-shrink-0 pt-1 ${amountColor}`}>{isIncome ? '+' : ''}{formatCurrency.format(item.amount)}</div>
@@ -6301,6 +6326,7 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
                       
                       {/* Bottom Row: Action Buttons */}
                       <div className="flex items-center justify-end gap-1 pt-2 border-t border-slate-100 dark:border-slate-800">
+                           {!isIncome && !isInvoice && <button onClick={(e) => { e.stopPropagation(); toggleTransactionReviewed(item.id); }} className={`p-2 rounded-lg transition-all active:scale-95 ${(item as any).reviewedAt ? 'text-emerald-600 bg-emerald-50 dark:bg-emerald-900/20 dark:text-emerald-300' : 'text-amber-600 bg-amber-50 dark:bg-amber-900/20 dark:text-amber-300'}`} title={(item as any).reviewedAt ? 'Mark as new' : 'Mark as reviewed'}><CheckCircle size={18}/></button>}
                            <button onClick={(e) => { e.stopPropagation(); if (isInvoice) duplicateInvoice(item as Invoice); else duplicateTransaction(item as Transaction); }} className="p-2 rounded-lg text-slate-400 dark:text-slate-300 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-all active:scale-95" title="Duplicate"><Copy size={18}/></button>
                            <button onClick={(e) => { e.stopPropagation(); handleEditItem(item); }} className="p-2 rounded-lg text-slate-400 dark:text-slate-300 hover:text-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all active:scale-95" title="Edit"><Edit3 size={18}/></button>
                            <button onClick={(e) => { e.stopPropagation(); if (isInvoice) deleteInvoice(item); else deleteTransaction(item.id); }} className="p-2 rounded-lg text-slate-400 dark:text-slate-300 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-all active:scale-95" title="Delete"><Trash2 size={18}/></button>
@@ -6991,13 +7017,12 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
                   <div className="mt-6 bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
                     <div className="text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400 mb-3">Audit Readiness (Quick Checks)</div>
                     {(() => {
-                      const requireReceipt = (settings.requireReceiptOverThreshold ?? true);
-                      const threshold = Number(settings.receiptThreshold ?? 0);
-                      const computedMissing = txForTaxYear.filter(t => t.type === 'expense' && requireReceipt && Number(t.amount || 0) >= threshold && !(t as any).receiptId).length;
-                      const missing = (auditMissingReceipts ?? computedMissing);
+                      const missing = txForTaxYear.filter(t => t.type === 'expense' && !(t as any).receiptId).length;
                       const missingCategory = txForTaxYear.filter(t => !t.category?.trim()).length;
                       const badMileage = mileageForTaxYear.filter(m => !m.purpose?.trim() || Number(m.miles || 0) <= 0).length;
                       const linkedReceipts = txForTaxYear.filter(t => t.type === 'expense' && (t as any).receiptId).length;
+                      const reviewedCount = txForTaxYear.filter(t => t.type === 'expense' && !!(t as any).reviewedAt).length;
+                      const pendingReviewCount = txForTaxYear.filter(t => t.type === 'expense' && !(t as any).reviewedAt).length;
                       const totalExpenses = txForTaxYear.filter(t => t.type === 'expense').length;
 
                       const Row = ({ ok, label, detail }: any) => (
@@ -7014,9 +7039,9 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
 
                       return (
                         <div className="space-y-0">
-                          <Row ok={missing === 0} label="Receipts linked (for required expenses)" detail={missing === 0 ? `Linked: ${linkedReceipts}/${totalExpenses} expense(s)` : (
+                          <Row ok={missing === 0} label="Receipts attached to expenses" detail={missing === 0 ? `Linked: ${linkedReceipts}/${totalExpenses} expense(s)` : (
                             <span className="flex items-center gap-2">
-                              <span className={`${auditMissingPulse ? "animate-pulse " : ""}font-extrabold text-amber-700 dark:text-amber-400`}>Missing receipts: {missing}</span>
+                              <span className={`${auditMissingPulse ? "animate-pulse " : ""}font-extrabold text-amber-700 dark:text-amber-400`}>Expenses without receipts: {missing}</span>
                               {auditMissingPulse && auditMissingDelta !== 0 ? (
                                 <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${auditMissingDelta < 0 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300" : "bg-rose-100 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300"}`}>{auditMissingDelta > 0 ? `+${auditMissingDelta}` : `${auditMissingDelta}`}</span>
                               ) : null}
@@ -7024,6 +7049,7 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
                           )} />
                           <Row ok={missingCategory === 0} label="Categories assigned" detail={missingCategory === 0 ? 'OK' : `Missing category: ${missingCategory}`} />
                           <Row ok={badMileage === 0} label="Mileage entries complete" detail={badMileage === 0 ? `Trips: ${mileageForTaxYear.length}` : `Incomplete trips: ${badMileage}`} />
+                          <Row ok={pendingReviewCount === 0} label="Expenses reviewed" detail={`Reviewed: ${reviewedCount} · Pending: ${pendingReviewCount}`} />
                         </div>
                       );
                     })()}
@@ -7640,7 +7666,7 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
 
                         <button
                           onClick={() => { setPlExportRequested(false); closePLPreview(); }}
-                          className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
+                          className="w-11 h-11 flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors"
                         >
                           <X className="w-5 h-5" />
                         </button>
@@ -8739,29 +8765,29 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
                         <span className="font-extrabold text-2xl text-emerald-900 dark:text-emerald-100">{(settings.taxRate + settings.stateTaxRate + 15.3).toFixed(1)}%</span>
                       </div>
 
-                    {/* Tax Prep / Audit Readiness Settings */}
+                    {/* Tax Prep / Record Organization Settings */}
                     <div className="mt-6 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
-                      <div className="text-xs font-bold uppercase tracking-widest text-slate-600 dark:text-slate-300 mb-4">Tax Prep / Audit Readiness</div>
-                      <div className="flex items-center justify-between gap-3 py-2">
-                        <div>
-                          <div className="text-sm font-extrabold text-slate-900 dark:text-white">Require receipts for expenses</div>
-                          <div className="text-xs text-slate-600 dark:text-slate-300">When enabled, expenses at/above the threshold cannot be saved without a linked receipt.</div>
-                        </div>
-                        <button type="button" onClick={() => setSettings(s => ({ ...s, requireReceiptOverThreshold: !(s.requireReceiptOverThreshold ?? true) }))} className={`px-4 py-2 rounded-lg font-extrabold uppercase tracking-widest text-xs ${ (settings.requireReceiptOverThreshold ?? true) ? 'bg-emerald-600 text-white' : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200'}`}>
-                          {(settings.requireReceiptOverThreshold ?? true) ? 'ON' : 'OFF'}
-                        </button>
-                      </div>
-
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                        <div>
-                          <label className="text-xs font-bold uppercase tracking-widest text-slate-600 dark:text-slate-300 mb-2 block">Receipt Threshold ($)</label>
-                          <input type="number" value={Number(settings.receiptThreshold ?? 0)} onChange={e => setSettings(s => ({ ...s, receiptThreshold: Number(e.target.value) }))} className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-4 py-3 font-extrabold text-sm" />
-                          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Set to 0 to require a receipt for every expense.</div>
-                        </div>
+                      <div className="text-xs font-bold uppercase tracking-widest text-slate-600 dark:text-slate-300 mb-4">Tax Prep / Record Organization</div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
                           <label className="text-xs font-bold uppercase tracking-widest text-slate-600 dark:text-slate-300 mb-2 block">Mileage Rate (cents per mile)</label>
                           <input type="number" step="0.1" value={Number(settings.mileageRateCents ?? 72.5)} onChange={e => setSettings(s => ({ ...s, mileageRateCents: Number(e.target.value) }))} className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-4 py-3 font-extrabold text-sm" />
-                          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Default set to 72.5¢/mile (edit as needed).</div>
+                          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Used to estimate business mileage in reports and tax summaries.</div>
+                        </div>
+                        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/40 p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-extrabold text-slate-900 dark:text-white">Receipt Reminder</div>
+                              <div className="text-xs text-slate-600 dark:text-slate-300">Attach receipts to business expenses now so you can review and organize them later.</div>
+                            </div>
+                            <button type="button" onClick={() => setSettings(s => ({ ...s, receiptReminderEnabled: !(s.receiptReminderEnabled ?? true) }))} className={`px-4 py-2 rounded-lg font-extrabold uppercase tracking-widest text-xs ${ (settings.receiptReminderEnabled ?? true) ? 'bg-emerald-600 text-white' : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200'}`}>
+                              {(settings.receiptReminderEnabled ?? true) ? 'ON' : 'OFF'}
+                            </button>
+                          </div>
+                        </div>
+                        <div className="md:col-span-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/40 p-4">
+                          <div className="text-sm font-extrabold text-slate-900 dark:text-white mb-1">Receipt Organization</div>
+                          <div className="text-xs text-slate-600 dark:text-slate-300">Save receipts with business expenses so they are easy to review later for bookkeeping, tax preparation, reimbursements, or recordkeeping. MONIEZI helps you capture now and decide later.</div>
                         </div>
                       </div>
                     </div>
@@ -8807,6 +8833,7 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
 
               {/* License Tab */}
               {LICENSING_ENABLED && settingsTab === 'license' && (
+
                 <div className="bg-white dark:bg-slate-900 p-8 rounded-xl border border-slate-200 dark:border-slate-800 shadow-lg animate-in fade-in slide-in-from-bottom-4">
                   <div className="flex items-center gap-3 mb-6">
                     <div className="w-10 h-10 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 flex items-center justify-center">
@@ -8814,8 +8841,9 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
                     </div>
                     <h3 className="text-xl font-bold text-slate-900 dark:text-white">License</h3>
                   </div>
-
-                  <div className={`p-6 rounded-xl border-2 ${
+                  
+                  {/* License Status Card */}
+                  <div className={`p-6 rounded-xl border-2 mb-6 ${
                     isLicenseValid 
                       ? 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800' 
                       : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'
@@ -8834,27 +8862,110 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
                             ? 'text-emerald-900 dark:text-emerald-100'
                             : 'text-red-900 dark:text-red-100'
                         }`}>
-                          {isLicenseValid ? 'License Active' : 'License Required'}
+                          {isLicenseValid ? 'License Active' : 'No License'}
                         </h4>
                         <p className={`text-sm ${
                           isLicenseValid
                             ? 'text-emerald-700 dark:text-emerald-300'
                             : 'text-red-700 dark:text-red-300'
                         }`}>
-                          {isLicenseValid
-                            ? 'This device is activated and ready to use MONIEZI.'
-                            : 'Enter a valid license key on startup to unlock MONIEZI.'}
+                          {isLicenseValid 
+                            ? 'Your Moniezi license is valid and active'
+                            : 'Please activate your license to use Moniezi'
+                          }
                         </p>
                       </div>
                     </div>
+
+                    {/* License Details */}
+                    {isLicenseValid && licenseInfo && (
+                      <div className="mt-4 pt-4 border-t border-emerald-200 dark:border-emerald-800 space-y-3">
+                        {licenseInfo.email ? (
+                          <div>
+                            <label className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider">Email</label>
+                            <p className="text-sm text-emerald-900 dark:text-emerald-100 font-medium break-all">{licenseInfo.email}</p>
+                          </div>
+                        ) : null}
+                        {licenseInfo.purchaseDate ? (
+                          <div>
+                            <label className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider">Purchased</label>
+                            <p className="text-sm text-emerald-900 dark:text-emerald-100 font-medium">{new Date(licenseInfo.purchaseDate).toLocaleDateString()}</p>
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
                   </div>
+
                 </div>
               )}
             </div>
           </div>
         )}
+        {/* Safety net: never allow navigation to render a blank screen */}
+        {!([
+          Page.Dashboard,
+          Page.Invoices,
+          Page.Invoice,
+          Page.AllTransactions,
+          Page.Ledger,
+          Page.Income,
+          Page.Expenses,
+          Page.Clients,
+          Page.Mileage,
+          Page.Reports,
+          Page.Settings,
+          Page.InvoiceDoc,
+        ] as const).includes(currentPage) && (
+          <div className="px-4 sm:px-6 pt-6">
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <div className="text-sm font-semibold text-slate-900">Navigation error</div>
+              <div className="mt-1 text-sm text-slate-600">
+                We couldn&apos;t load this screen. Tap a tab below to continue.
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  onClick={() => setCurrentPage(Page.Dashboard)}
+                  className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+                >
+                  Home
+                </button>
+                <button
+                  onClick={() => setCurrentPage(Page.Invoices)}
+                  className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-900"
+                >
+                  Invoices
+                </button>
+                <button
+                  onClick={() => setCurrentPage(Page.AllTransactions)}
+                  className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-900"
+                >
+                  Ledger
+                </button>
+                <button
+                  onClick={() => setCurrentPage(Page.Clients)}
+                  className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-900"
+                >
+                  Clients
+                </button>
+                <button
+                  onClick={() => setCurrentPage(Page.Mileage)}
+                  className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-900"
+                >
+                  Mileage
+                </button>
+                <button
+                  onClick={() => setCurrentPage(Page.Reports)}
+                  className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-900"
+                >
+                  Reports
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
       </PageErrorBoundary>
+
       </div>
 
       {/* Scroll to Top Button - rendered via Portal to escape overflow-hidden container */}
@@ -8880,9 +8991,9 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
       {/* Help Modal */}
       {showHelpModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-stretch justify-stretch p-0 modal-overlay">
-          <div className="bg-white dark:bg-slate-900 rounded-none w-full h-full overflow-hidden flex flex-col" style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 12px)' }}>
+          <div className="bg-white dark:bg-slate-900 rounded-none w-full h-full overflow-hidden flex flex-col" style={{ paddingTop: "max(14px, env(safe-area-inset-top, 14px))" }}>
             {/* Header */}
-            <div className="flex items-center justify-between px-6 pb-4 border-b border-slate-200 dark:border-slate-800">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-800">
               <div className="flex items-center gap-2">
                 <HelpCircle className="text-blue-600" size={18} />
                 <span className="font-bold text-sm uppercase tracking-wider text-slate-700 dark:text-slate-200">
@@ -8892,7 +9003,7 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
               </div>
               <button
                 onClick={closeHelp}
-                className="w-11 h-11 flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors"
+                className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
                 aria-label="Close help"
               >
                 <X className="w-5 h-5" />
@@ -9291,14 +9402,25 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><DateInput label="Date" value={activeItem.date || ''} onChange={v => setActiveItem(prev => ({ ...prev, date: v }))} /><div><label className="text-sm font-bold text-slate-600 dark:text-slate-300 mb-2 block pl-1">Amount</label><div className="relative"><span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-600 dark:text-slate-300 font-bold">{settings.currencySymbol}</span><input type="number" value={activeItem.amount || ''} onChange={e => setActiveItem(prev => ({ ...prev, amount: Number(e.target.value) }))} className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-0 rounded-lg pl-10 pr-4 py-4 font-bold text-lg outline-none focus:ring-2 focus:ring-blue-500/20" placeholder="0.00" /></div></div></div>
                       <div><label className="text-sm font-bold text-slate-600 dark:text-slate-300 mb-2 block pl-1">Category</label>{renderCategoryChips(activeItem.category, (cat) => setActiveItem(prev => ({ ...prev, category: cat })))}</div>
                       {activeTab === 'expense' && (
+                        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-extrabold text-slate-900 dark:text-white">Review Status</div>
+                              <div className="text-xs text-slate-600 dark:text-slate-300 mt-1">Mark this expense as reviewed after checking category, amount, and receipt.</div>
+                            </div>
+                            <button type="button" onClick={() => setActiveItem((prev: any) => ({ ...prev, reviewedAt: prev.reviewedAt ? undefined : new Date().toISOString() }))} className={`px-4 py-2 rounded-lg font-extrabold uppercase tracking-widest text-xs ${(activeItem as any).reviewedAt ? 'bg-emerald-600 text-white' : 'bg-amber-100 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300'}`}>
+                              {(activeItem as any).reviewedAt ? 'Reviewed' : 'New'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      {activeTab === 'expense' && (
                         <div className="space-y-2">
                           <div className="flex items-center justify-between">
                             <label className="text-sm font-bold text-slate-600 dark:text-slate-300 mb-2 block pl-1">Receipt</label>
-                            {(settings.requireReceiptOverThreshold ?? true) && Number((activeItem as any).amount || 0) >= Number(settings.receiptThreshold ?? 0) ? (
-                              <span className={`text-[10px] font-extrabold uppercase tracking-widest px-2 py-1 rounded-full ${(activeItem as any).receiptId ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300" : "bg-amber-100 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300"}`}>
-                                {(activeItem as any).receiptId ? "Linked" : "Required"}
-                              </span>
-                            ) : null}
+                            <span className={`text-[10px] font-extrabold uppercase tracking-widest px-2 py-1 rounded-full ${(activeItem as any).receiptId ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300" : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"}`}>
+                              {(activeItem as any).receiptId ? "Linked" : "Optional"}
+                            </span>
                           </div>
 
                           {/* Linked receipt preview (thumbnail) */}
@@ -9377,11 +9499,11 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
                             <button type="button" onClick={() => scanInputRef.current?.click()} className="px-4 py-3 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-extrabold text-sm uppercase tracking-wider hover:bg-slate-300 dark:hover:bg-slate-700 active:scale-95 transition-all">Scan</button>
                           </div>
 
-                          {(settings.requireReceiptOverThreshold ?? true) && Number((activeItem as any).amount || 0) >= Number(settings.receiptThreshold ?? 0) && !(activeItem as any).receiptId && (
-                            <div className="flex items-start gap-2 text-xs font-bold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
-                              <AlertTriangle size={16} className="mt-0.5" />
+                          {!(activeItem as any).receiptId && (
+                            <div className="flex items-start gap-2 text-xs font-bold text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-900/20 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
+                              <Info size={16} className="mt-0.5" />
                               <div>
-                                This expense is marked as <span className="font-extrabold">receipt-required</span> (over your threshold). Scan or select a receipt, then Save.
+                                Attach a receipt if you have one. You can save now and link it later.
                               </div>
                             </div>
                           )}
