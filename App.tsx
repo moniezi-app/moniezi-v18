@@ -851,6 +851,35 @@ export default function App() {
     return () => window.removeEventListener('hashchange', syncHashToState);
   }, [syncHashToState]);
 
+  useEffect(() => {
+    const isAppleMobile = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+    const updateViewportVars = () => {
+      const vv = window.visualViewport;
+      const height = vv?.height || window.innerHeight;
+      const offsetTop = vv?.offsetTop || 0;
+
+      document.documentElement.style.setProperty('--moniezi-app-vh', `${height * 0.01}px`);
+      document.documentElement.style.setProperty(
+        '--moniezi-ios-top-pad',
+        isAppleMobile ? `${Math.max(16, Math.round(offsetTop + 16))}px` : '0px'
+      );
+    };
+
+    updateViewportVars();
+    window.addEventListener('resize', updateViewportVars);
+    window.addEventListener('orientationchange', updateViewportVars);
+    window.visualViewport?.addEventListener('resize', updateViewportVars);
+    window.visualViewport?.addEventListener('scroll', updateViewportVars);
+
+    return () => {
+      window.removeEventListener('resize', updateViewportVars);
+      window.removeEventListener('orientationchange', updateViewportVars);
+      window.visualViewport?.removeEventListener('resize', updateViewportVars);
+      window.visualViewport?.removeEventListener('scroll', updateViewportVars);
+    };
+  }, []);
+
   const updateHashParams = useCallback(
     (updates: Record<string, string | null | undefined>, opts?: { replace?: boolean; keepPath?: boolean }) => {
       const base = window.location.href.split('#')[0];
@@ -5306,7 +5335,15 @@ html:not(.dark) .shadow { box-shadow: 0 1px 3px rgba(2, 6, 23, 0.14), 0 1px 2px 
 /* Slightly stronger separators */
 html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-color: rgb(203 213 225) !important; }
 `}</style>
-      <div className="h-screen max-h-screen flex flex-col max-w-2xl mx-auto relative bg-slatebg dark:bg-slate-950 text-slate-900 dark:text-white overflow-hidden transition-colors duration-300">
+      <div
+        className="flex flex-col max-w-2xl mx-auto relative bg-slatebg dark:bg-slate-950 text-slate-900 dark:text-white overflow-hidden transition-colors duration-300"
+        style={{
+          height: 'calc(var(--moniezi-app-vh, 1vh) * 100)',
+          minHeight: 'calc(var(--moniezi-app-vh, 1vh) * 100)',
+          maxHeight: 'calc(var(--moniezi-app-vh, 1vh) * 100)',
+          paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+        }}
+      >
 
       {/* Scan Receipt Confirm Modal */}
       {scanPreview && (
@@ -5786,7 +5823,7 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
 
       <header 
         className={`no-print flex items-center justify-between px-4 sm:px-6 md:px-8 pb-4 sm:pb-6 sticky top-0 bg-slatebg/90 dark:bg-slate-950/90 backdrop-blur-xl z-50 border-b border-slate-200 dark:border-slate-800 transition-colors duration-300`}
-        style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 1rem)' }}
+        style={{ paddingTop: 'max(1rem, calc(env(safe-area-inset-top, 0px) + var(--moniezi-ios-top-pad, 0px)))' }}
       >
         <Logo onClick={() => setCurrentPage(Page.Dashboard)} />
         <div className="flex gap-1.5 sm:gap-2 flex-shrink-0">
@@ -5807,7 +5844,7 @@ html:not(.dark) .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-col
         </div>
       </header>
 
-      <div ref={mainScrollRef} className="flex-1 min-h-0 overflow-y-auto pb-44 px-6 md:px-8 no-print custom-scrollbar" role="main">
+      <div ref={mainScrollRef} className="flex-1 min-h-0 overflow-y-auto px-6 md:px-8 no-print custom-scrollbar" style={{ paddingBottom: 'calc(11rem + env(safe-area-inset-bottom, 0px))' }} role="main">
 
       <PageErrorBoundary key={currentPage} onReset={() => setCurrentPage(Page.Dashboard)}>
 
